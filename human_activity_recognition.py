@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
+import random
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import OneHotEncoder
 from keras.models import Sequential
@@ -16,6 +17,7 @@ class HAR:
         self.train_file = train_file
         self.test_file = test_file
 
+        # dataframes loaded from the csv files
         self.train_data = None
         self.test_data = None
         self.n_features = None  # all columns except subject,Activity
@@ -144,16 +146,264 @@ class HAR:
         scores = model.evaluate(test_data_x, test_data_y)
         print("\nAccuracy: %.2f%%" % (scores[1] * 100))
 
+
+# TODO Currently only numeric features handled. Extend to categorical/nominal feature types.
+class DecisionNode:
+    def __init__(self, data_index_array, depth_level=None):
+        self.data_index_array = data_index_array
+        self.is_terminal = None
+        self.split_attribute = None
+        self.split_value = None
+        self.left_child_index = None
+        self.right_child_index = None
+        self.depth_level = depth_level
+        self.predict_val = None
+
+
+# TODO Currently classification tree. Extend to regression.
+class DecisionTree:
+    def __init__(self, train_data_x, train_data_y, min_samples=5, max_depth=20):
+        """Initialize
+
+            Parameters
+            ----------
+            train_data_x : numpy.ndarray of float with shape(n_samples,n_features)
+            train_data_y : numpy array of string
+        """
+        self.nodes = []  # Think about changes that might come due to prune
+        self.train_data_x = train_data_x
+        self.train_data_y = train_data_y
+        self.min_samples = min_samples  # Minimum number of samples for a node to have to be considered for split
+        self.max_depth = max_depth
+        # TODO pass the list of feature names
+
+    def build_tree(self):
+        root_node = DecisionNode(data_index_array=range(self.train_data_x.shape[0]), depth_level=0)
+        self.nodes.append(root_node)
+        self.build_sub_tree(0)
+
+    def build_sub_tree(self, node_index):
+        """Builds subtree recursively with node_index as root
+        """
+        flag_split, best_split_feature_index, best_split_feature_val, best_split_gini_index = self.split_node(node_index)
+        print "node_index: {0} :: flag_split: {1} : best_split_feature_index: {2} : best_split_feature_val: {3} :" \
+              " depth: {4} : gini index: {5}".format(node_index, flag_split, best_split_feature_index, best_split_feature_val,
+                                   self.nodes[node_index].depth_level, best_split_gini_index)
+
+        if flag_split is False:
+            # assign node as node_index as terminal node
+            self.nodes[node_index].is_terminal = True
+
+            # assign the class based on majority
+            class_count_dict = dict()
+            for sample_i in self.nodes[node_index].data_index_array:
+                cur_class = self.train_data_y[sample_i]
+                if cur_class in class_count_dict:
+                    class_count_dict[cur_class] += 1
+                else:
+                    class_count_dict[cur_class] = 1
+
+            majority_class = None
+            majority_count = 0
+            for cur_class in class_count_dict:
+                if class_count_dict[cur_class] > majority_count:
+                    majority_class = cur_class
+                    majority_count = class_count_dict[cur_class]
+
+            assert majority_class is not None, "predicted class for the terminal node with node_index: {0} is None".format(node_index)
+            self.nodes[node_index].predict_val = majority_class
+            return
+        else:
+            depth_level_node = self.nodes[node_index].depth_level
+
+            # extract the indices for the children
+            left_child_indices = []
+            right_child_indices = []
+            for sample_i in self.nodes[node_index].data_index_array:
+                if self.train_data_x[sample_i, best_split_feature_index] < best_split_feature_val:
+                    left_child_indices.append(sample_i)
+                else:
+                    right_child_indices.append(sample_i)
+
+            print "  size(left node): {0} :: size(right node): {1}".format(len(left_child_indices), len(right_child_indices))
+            # create the nodes: left child, right child
+            left_child_node = DecisionNode(data_index_array=left_child_indices, depth_level=depth_level_node+1)
+            right_child_node = DecisionNode(data_index_array=right_child_indices, depth_level=depth_level_node+1)
+
+            left_child_node_index = len(self.nodes)
+            self.nodes.append(left_child_node)
+            right_child_node_index = len(self.nodes)
+            self.nodes.append(right_child_node)
+
+            self.nodes[node_index].is_terminal = False
+            self.nodes[node_index].split_attribute = best_split_feature_index
+            self.nodes[node_index].split_value = best_split_feature_val
+            self.nodes[node_index].left_child_index = left_child_node_index
+            self.nodes[node_index].right_child_index = right_child_node_index
+
+            # recursively call build_sub_tree with left and right children
+            self.build_sub_tree(left_child_node_index)
+            self.build_sub_tree(right_child_node_index)
+
+    def split_node(self, node_index):
+        """Split node into two children (if applicable). Else tag the node as terminal node.
+        """
+        # First check suitability of splitting the node.
+        node_level = self.nodes[node_index].depth_level
+        if node_level >= self.max_depth:
+            self.nodes[node_index].is_terminal = True
+            return False, None, None, None
+
+        node_sample_size = len(self.nodes[node_index].data_index_array)
+        if node_sample_size < self.min_samples:
+            self.nodes[node_index].is_terminal = True
+            return False, None, None, None
+
+        assert node_sample_size > 0, "Empty node: node_index: {0} :: node_level: {1}".format(node_index, node_level)
+
+        # If all the samples in the current node belongs to same class, there's no need to split the node
+        # ??? Should we be strict or allow flexibitly i.e. if the dominant class is beyond a certain fraction we shouldn't split
+        # But the issue could also be that we are doing a problem of unbalanced classes
+        flag_mixed_class = False
+        prev_sample_index = self.nodes[node_index].data_index_array[0]
+        for sample_i in range(1, node_sample_size):
+            cur_sample_index = self.nodes[node_index].data_index_array[sample_i]
+            if self.train_data_y[prev_sample_index] != self.train_data_y[cur_sample_index]:
+                flag_mixed_class = True
+                break
+            else:
+                prev_sample_index = cur_sample_index
+
+        if flag_mixed_class is False:
+            return False, None, None, None
+
+        # Iterate over the attributes to decide the attribute for the split
+        n_features = self.train_data_x.shape[1]
+
+        best_gini_index = np.inf
+        best_split_feature_index = None
+        best_split_feature_val = None
+
+        for feature_i in range(n_features):
+            cur_feature_values = self.train_data_x[self.nodes[node_index].data_index_array, feature_i]
+            # ?? can we avoid sorting at each level
+            # sort the feature values as we would select split points at different percentile
+            cur_feature_values = sorted(cur_feature_values)
+            # approach #1: select split points at equal interval of index
+            percentile_interval = 10
+            index_interval = max(1, int(np.floor(percentile_interval*len(cur_feature_values)/100)))
+
+            for perc_i in range(1, min(int(np.floor(100/percentile_interval)), node_sample_size)):
+                split_index = perc_i*index_interval - 1
+                split_value = cur_feature_values[split_index]
+                # split the samples into two groups based on the values of feature_i
+                left_group = []
+                right_group = []
+                for sample_i in self.nodes[node_index].data_index_array:
+                    cur_feature_value = self.train_data_x[sample_i, feature_i]
+                    if cur_feature_value < split_value:
+                        left_group.append(sample_i)
+                    else:
+                        right_group.append(sample_i)
+
+                # compute the gini index for each of the groups
+                gini_index_left_child = self.compute_gini_index(left_group)
+                gini_index_right_child = self.compute_gini_index(right_group)
+                gini_index_node = gini_index_left_child*len(left_group)*1.0/node_sample_size + \
+                                  gini_index_right_child*len(right_group)*1.0/node_sample_size
+
+                if gini_index_node < best_gini_index:
+                    best_gini_index = gini_index_node
+                    best_split_feature_index = feature_i
+                    best_split_feature_val = split_value
+
+        return True, best_split_feature_index, best_split_feature_val, best_gini_index
+
+    def compute_gini_index(self, group_samples):
+        """Compute gini index for the group which we are considering for child node
+
+            Parameters
+            ----------
+            group_samples : numpy array of indices of the train data
+        """
+        class_count_dict = dict()
+        # populate count of samples in the group belonging to its corresponding class
+        for sample_i in group_samples:
+            cur_class = self.train_data_y[sample_i]
+            if cur_class in class_count_dict:
+                class_count_dict[cur_class] += 1
+            else:
+                class_count_dict[cur_class] = 1
+
+        # Now compute the gini index
+        n_group_samples = len(group_samples)
+        gini_index = 0.0
+        for class_y in class_count_dict:
+            cur_class_prob = class_count_dict[class_y]*1.0/n_group_samples
+            gini_index += cur_class_prob*(1.0 - cur_class_prob)
+
+        return gini_index
+
+    def evaluate(self, test_data_x, test_data_y):
+        accuracy = 0.0
+        names_class = np.unique(self.train_data_y)
+        # https://stackoverflow.com/questions/11106536/adding-row-column-headers-to-numpy-matrices (bmu's answer)
+        confusion_matrix = pd.DataFrame(np.zeros((len(names_class), len(names_class))), index=names_class, columns=names_class)
+        for sample_i in range(test_data_x.shape[0]):
+            test_sample_x = test_data_x[sample_i, :]
+            true_class = test_data_y[sample_i]
+            predicted_class = self.predict(test_sample_x)
+
+            if predicted_class == true_class:
+                accuracy += 1
+
+            confusion_matrix[true_class][predicted_class] += 1
+
+        accuracy /= test_data_x.shape[0]
+        accuracy *= 100
+        print "accuracy: ", accuracy
+        print "confusion matrix: (row=>true class; col=>predicted class)"
+        print confusion_matrix
+
+    def predict(self, test_sample_x):
+        # parse the tree till we reach the terminal node
+        node_index = 0  # root node
+        while not self.nodes[node_index].is_terminal:
+            split_attribute = self.nodes[node_index].split_attribute
+            split_value = self.nodes[node_index].split_value
+            if test_sample_x[split_attribute] < split_value:
+                node_index = self.nodes[node_index].left_child_index
+            else:
+                node_index = self.nodes[node_index].right_child_index
+
+        assert self.nodes[node_index].is_terminal is True, "reached a non-terminal node: node_index: {0}".format(node_index)
+        return self.nodes[node_index].predict_val
+
 if __name__ == "__main__":
     har_obj = HAR()
     har_obj.load_train_data()
     har_obj.load_test_data()
-    har_obj.train_model(n_timestep=10, nb_epoch=5)
+    flag_lstm_method = False
+    if flag_lstm_method is True:
+        har_obj.train_model(n_timestep=10, nb_epoch=5)
+    else:
+        train_data_x = np.array(har_obj.train_data.ix[:, har_obj.train_data.columns.difference(["subject", "Activity"])])
+        train_data_y = np.array(har_obj.train_data.ix[:, "Activity"])
+        # Pick a random subset of the features
+        feature_indices = sorted(random.sample(range(train_data_x.shape[1]), 100))
+        train_data_x = train_data_x[:, feature_indices]
+        decision_tree_obj = DecisionTree(train_data_x, train_data_y, max_depth=10)
+        decision_tree_obj.build_tree()
+        test_data_x = np.array(har_obj.test_data.ix[:, har_obj.test_data.columns.difference(["subject", "Activity"])])
+        test_data_y = np.array(har_obj.test_data.ix[:, "Activity"])
+        test_data_x = test_data_x[:, feature_indices]
+        decision_tree_obj.evaluate(test_data_x, test_data_y)
+        gh = 0
 
 
 """
 References:
-    Followed the explanation in these forums:
+    Followed the LSTM explanation in these forums:
     https://datascience.stackexchange.com/questions/17024/rnns-with-multiple-features
     https://machinelearningmastery.com/sequence-classification-lstm-recurrent-neural-networks-python-keras/
 
@@ -164,4 +414,6 @@ References:
     Mentions that sparse encoding might not be suitable for Keras
 
     https://stackoverflow.com/questions/33385238/how-to-convert-pandas-single-column-data-frame-to-series-or-numpy-vector
+
+    https://machinelearningmastery.com/implement-decision-tree-algorithm-scratch-python/
 """
