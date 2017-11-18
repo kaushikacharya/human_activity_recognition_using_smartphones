@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import random
+from Queue import Queue
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import OneHotEncoder
 from keras.models import Sequential
@@ -149,15 +150,20 @@ class HAR:
 
 # TODO Currently only numeric features handled. Extend to categorical/nominal feature types.
 class DecisionNode:
-    def __init__(self, data_index_array, depth_level=None):
+    def __init__(self, data_index_array, depth_level=None, parent_index=None):
         self.data_index_array = data_index_array
         self.is_terminal = None
         self.split_attribute = None
         self.split_value = None
+        self.parent_index = parent_index
         self.left_child_index = None
         self.right_child_index = None
         self.depth_level = depth_level
+        # predict_val: # For classification -> majority class
+        #               # For regression -> average over the values in this node
         self.predict_val = None
+        # class_count_dict: Only for classification
+        self.class_count_dict = None
 
 
 # TODO Currently classification tree. Extend to regression.
@@ -178,12 +184,14 @@ class DecisionTree:
         # TODO pass the list of feature names
 
     def build_tree(self):
+        print "Build tree started"
         root_node = DecisionNode(data_index_array=range(self.train_data_x.shape[0]), depth_level=0)
         self.nodes.append(root_node)
         self.build_sub_tree(0)
+        print "Build tree completed. Number of nodes: {0}".format(len(self.nodes))
 
     def build_sub_tree(self, node_index):
-        """Builds subtree recursively with node_index as root
+        """Builds subtree recursively with node_index as root of subtree
         """
         flag_split, best_split_feature_index, best_split_feature_val, best_split_gini_index = self.split_node(node_index)
         print "node_index: {0} :: flag_split: {1} : best_split_feature_index: {2} : best_split_feature_val: {3} :" \
@@ -211,6 +219,7 @@ class DecisionTree:
                     majority_count = class_count_dict[cur_class]
 
             assert majority_class is not None, "predicted class for the terminal node with node_index: {0} is None".format(node_index)
+            self.nodes[node_index].class_count_dict = class_count_dict
             self.nodes[node_index].predict_val = majority_class
             return
         else:
@@ -227,8 +236,8 @@ class DecisionTree:
 
             print "  size(left node): {0} :: size(right node): {1}".format(len(left_child_indices), len(right_child_indices))
             # create the nodes: left child, right child
-            left_child_node = DecisionNode(data_index_array=left_child_indices, depth_level=depth_level_node+1)
-            right_child_node = DecisionNode(data_index_array=right_child_indices, depth_level=depth_level_node+1)
+            left_child_node = DecisionNode(data_index_array=left_child_indices, depth_level=depth_level_node+1, parent_index=node_index)
+            right_child_node = DecisionNode(data_index_array=right_child_indices, depth_level=depth_level_node+1, parent_index=node_index)
 
             left_child_node_index = len(self.nodes)
             self.nodes.append(left_child_node)
@@ -319,6 +328,98 @@ class DecisionTree:
 
         return True, best_split_feature_index, best_split_feature_val, best_gini_index
 
+    def prune_tree(self):
+        """Prune tree
+        """
+        print "tree pruning started"
+        # Collect the internal nodes whose both children are leaf nodes
+        candidate_node_indices = Queue()
+        n_leaf_nodes = 0
+        for node_index in range(len(self.nodes)):
+            if self.nodes[node_index].is_terminal is True:
+                # current node is itself a leaf node
+                n_leaf_nodes += 1
+                continue
+
+            left_child_node_index = self.nodes[node_index].left_child_index
+            right_child_node_index = self.nodes[node_index].right_child_index
+
+            if self.nodes[left_child_node_index].is_terminal and self.nodes[right_child_node_index].is_terminal:
+                candidate_node_indices.put(node_index)
+
+        while candidate_node_indices.empty() is False:
+            node_index = candidate_node_indices.get()
+            assert self.nodes[node_index].is_terminal is False, "Only internal nodes should come"
+
+            # check if converting sub-tree with node_index as root would have less total cost than the current total cost
+            left_child_node_index = self.nodes[node_index].left_child_index
+            right_child_node_index = self.nodes[node_index].right_child_index
+
+            left_child_class_count_dict = self.nodes[left_child_node_index].class_count_dict
+            right_child_class_count_dict = self.nodes[right_child_node_index].class_count_dict
+
+            # combined class count dict
+            combined_class_count_dict = left_child_class_count_dict
+            for cur_class in right_child_class_count_dict:
+                if cur_class in combined_class_count_dict:
+                    combined_class_count_dict[cur_class] += right_child_class_count_dict[cur_class]
+                else:
+                    combined_class_count_dict[cur_class] = right_child_class_count_dict[cur_class]
+
+            combined_majority_class = None
+            combined_majority_count = 0
+            for cur_class in combined_class_count_dict:
+                if combined_class_count_dict[cur_class] > combined_majority_count:
+                    combined_majority_class = cur_class
+                    combined_majority_count = combined_class_count_dict[cur_class]
+
+            left_child_majority_class = self.nodes[left_child_node_index].predict_val
+            right_child_majority_class = self.nodes[right_child_node_index].predict_val
+
+            combined_node_classification_error = len(self.nodes[left_child_node_index].data_index_array) + \
+                                                 len(self.nodes[right_child_node_index].data_index_array) - \
+                                                 combined_majority_count
+            subtree_classification_error = len(self.nodes[left_child_node_index].data_index_array) - \
+                                           left_child_class_count_dict[self.nodes[left_child_node_index].predict_val] +\
+                                           len(self.nodes[right_child_node_index].data_index_array) - \
+                                           right_child_class_count_dict[self.nodes[right_child_node_index].predict_val]
+
+            # As both the left and right nodes are leaf nodes, pruning them would lead to one decrease in number of leaf nodes
+            n_samples = len(self.nodes[0].data_index_array)
+            flag_prune = False
+            if (combined_node_classification_error - subtree_classification_error)*1.0/n_samples < 0.01:
+                flag_prune = True
+
+            if flag_prune is False:
+                continue
+
+            # if yes, then convert this sub-tree into a leaf node
+            self.nodes[left_child_node_index] = None
+            self.nodes[right_child_node_index] = None
+
+            self.nodes[node_index].is_terminal = True
+            self.nodes[node_index].predict_val = combined_majority_class
+            self.nodes[node_index].class_count_dict = combined_class_count_dict
+
+            # Also if other child of the parent of node_index is leaf node then push the parent into candidate_node_indices
+            parent_node_index = self.nodes[node_index].parent_index
+            if parent_node_index == 0:
+                # root node can't be pruned
+                continue
+            if self.nodes[parent_node_index].left_child_index == node_index:
+                other_child_node_index = self.nodes[parent_node_index].right_child_index
+            else:
+                other_child_node_index = self.nodes[parent_node_index].left_child_index
+
+            if self.nodes[other_child_node_index].is_terminal is True:
+                candidate_node_indices.put(parent_node_index)
+
+        n_pruned_nodes = 0
+        for node_index in range(len(self.nodes)):
+            if self.nodes[node_index] is None:
+                n_pruned_nodes += 1
+        print "{0} nodes pruned out of {1}".format(n_pruned_nodes, len(self.nodes))
+
     def compute_gini_index(self, group_samples):
         """Compute gini index for the group which we are considering for child node
 
@@ -384,9 +485,11 @@ if __name__ == "__main__":
     har_obj.load_train_data()
     har_obj.load_test_data()
     flag_lstm_method = False
+
     if flag_lstm_method is True:
         har_obj.train_model(n_timestep=10, nb_epoch=5)
     else:
+        # Decision Tree
         train_data_x = np.array(har_obj.train_data.ix[:, har_obj.train_data.columns.difference(["subject", "Activity"])])
         train_data_y = np.array(har_obj.train_data.ix[:, "Activity"])
         # Pick a random subset of the features
@@ -394,11 +497,11 @@ if __name__ == "__main__":
         train_data_x = train_data_x[:, feature_indices]
         decision_tree_obj = DecisionTree(train_data_x, train_data_y, max_depth=10)
         decision_tree_obj.build_tree()
+        decision_tree_obj.prune_tree()
         test_data_x = np.array(har_obj.test_data.ix[:, har_obj.test_data.columns.difference(["subject", "Activity"])])
         test_data_y = np.array(har_obj.test_data.ix[:, "Activity"])
         test_data_x = test_data_x[:, feature_indices]
         decision_tree_obj.evaluate(test_data_x, test_data_y)
-        gh = 0
 
 
 """
@@ -415,5 +518,6 @@ References:
 
     https://stackoverflow.com/questions/33385238/how-to-convert-pandas-single-column-data-frame-to-series-or-numpy-vector
 
-    https://machinelearningmastery.com/implement-decision-tree-algorithm-scratch-python/
+    Decision Tree:
+        https://machinelearningmastery.com/implement-decision-tree-algorithm-scratch-python/
 """
