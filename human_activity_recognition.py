@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import random
+import argparse
 from Queue import Queue
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import OneHotEncoder
@@ -124,7 +125,7 @@ class HAR:
 
         return data_x, data_y
 
-    def train_model(self, n_timestep=5, nb_epoch=5):
+    def train_lstm_model(self, n_timestep=5, nb_epoch=5):
         """Train the LSTM model for many-to-one
         """
         # Create each datapoint with 5 timesteps (say).
@@ -146,6 +147,32 @@ class HAR:
         model.fit(x=train_data_x, y=train_data_y, nb_epoch=nb_epoch)
         scores = model.evaluate(test_data_x, test_data_y)
         print("\nAccuracy: %.2f%%" % (scores[1] * 100))
+
+    @staticmethod
+    def select_feature_subset(train_data_x, n_feature_subset, method="random"):
+        """Select feature subset
+
+            Parameters
+            ----------
+            n_feature_subset : py:class:`Int` : Feature subset size
+            method : py:class:`String` either random or std
+                    std: select features with topmost standard deviation
+        """
+        if method == "random":
+            feature_indices = sorted(random.sample(range(train_data_x.shape[1]), n_feature_subset))
+        elif method == "std":
+            std_arr = np.std(a=train_data_x, axis=0)
+            # https://stackoverflow.com/questions/22414152/best-way-to-initialize-and-fill-an-numpy-array
+            feature_indices = np.empty(train_data_x.shape[1], dtype=int)
+            j = 0
+            for i, val in sorted(enumerate(std_arr), key=lambda x: x[1], reverse=True):
+                feature_indices[j] = i
+                j += 1
+            feature_indices = feature_indices[:n_feature_subset]
+        else:
+            assert False, "method should be one of these: 1. random  2. std"
+
+        return feature_indices
 
 
 # TODO Currently only numeric features handled. Extend to categorical/nominal feature types.
@@ -169,7 +196,7 @@ class DecisionNode:
 # TODO Currently classification tree. Extend to regression.
 class DecisionTree:
     def __init__(self, train_data_x, train_data_y, min_samples=5, max_depth=20):
-        """Initialize
+        """Initialize decision tree
 
             Parameters
             ----------
@@ -181,22 +208,25 @@ class DecisionTree:
         self.train_data_y = train_data_y
         self.min_samples = min_samples  # Minimum number of samples for a node to have to be considered for split
         self.max_depth = max_depth
-        # TODO pass the list of feature names
+        # TODO pass the list of feature names => probably no more required as train_data_x is build using the feature
+        # names which we want
 
-    def build_tree(self):
+    def build_tree(self, verbose=False):
         print "Build tree started"
         root_node = DecisionNode(data_index_array=range(self.train_data_x.shape[0]), depth_level=0)
         self.nodes.append(root_node)
-        self.build_sub_tree(0)
+        self.build_sub_tree(node_index=0, verbose=verbose)
         print "Build tree completed. Number of nodes: {0}".format(len(self.nodes))
 
-    def build_sub_tree(self, node_index):
+    def build_sub_tree(self, node_index, verbose=False):
         """Builds subtree recursively with node_index as root of subtree
         """
         flag_split, best_split_feature_index, best_split_feature_val, best_split_gini_index = self.split_node(node_index)
-        print "node_index: {0} :: flag_split: {1} : best_split_feature_index: {2} : best_split_feature_val: {3} :" \
-              " depth: {4} : gini index: {5}".format(node_index, flag_split, best_split_feature_index, best_split_feature_val,
-                                   self.nodes[node_index].depth_level, best_split_gini_index)
+        if verbose:
+            print "node_index: {0} :: flag_split: {1} : best_split_feature_index: {2} : best_split_feature_val: {3} :" \
+                  " depth: {4} : gini index: {5}".format(node_index, flag_split, best_split_feature_index,
+                                                         best_split_feature_val, self.nodes[node_index].depth_level,
+                                                         best_split_gini_index)
 
         if flag_split is False:
             # assign node as node_index as terminal node
@@ -234,7 +264,9 @@ class DecisionTree:
                 else:
                     right_child_indices.append(sample_i)
 
-            print "  size(left node): {0} :: size(right node): {1}".format(len(left_child_indices), len(right_child_indices))
+            if verbose:
+                print "  size(left node): {0} :: size(right node): {1}".format(len(left_child_indices),
+                                                                               len(right_child_indices))
             # create the nodes: left child, right child
             left_child_node = DecisionNode(data_index_array=left_child_indices, depth_level=depth_level_node+1, parent_index=node_index)
             right_child_node = DecisionNode(data_index_array=right_child_indices, depth_level=depth_level_node+1, parent_index=node_index)
@@ -480,31 +512,126 @@ class DecisionTree:
         assert self.nodes[node_index].is_terminal is True, "reached a non-terminal node: node_index: {0}".format(node_index)
         return self.nodes[node_index].predict_val
 
-if __name__ == "__main__":
+
+# TODO currently only works for classification
+class Bagging:
+    """Bagging using boot strapped samples
+    """
+    def __init__(self, train_data_x, train_data_y, n_decision_trees, min_samples=5, max_depth=20):
+        self.decision_trees = []
+        self.train_data_x = train_data_x
+        self.train_data_y = train_data_y
+        self.n_decision_trees = n_decision_trees
+        self.min_samples = min_samples  # Minimum number of samples for a node to have to be considered for split
+        self.max_depth = max_depth
+
+    def build_trees(self):
+        n_sample = self.train_data_x.shape[0]
+        for tree_i in range(self.n_decision_trees):
+            print "tree #{0}".format(tree_i)
+            # bootstrap samples with replacement
+            sample_indices = np.random.choice(a=range(n_sample), size=n_sample, replace=True)
+            cur_train_data_x = self.train_data_x[sample_indices, :]
+            cur_train_data_y = self.train_data_y[sample_indices]
+            # create a decision tree using the current bootstrapped samples
+            decision_tree_obj = DecisionTree(train_data_x=cur_train_data_x, train_data_y=cur_train_data_y,
+                                             min_samples=self.min_samples, max_depth=self.max_depth)
+            decision_tree_obj.build_tree()
+            self.decision_trees.append(decision_tree_obj)
+
+    def evaluate(self, test_data_x, test_data_y):
+        accuracy = 0.0
+        names_class = np.unique(self.train_data_y)
+        # https://stackoverflow.com/questions/11106536/adding-row-column-headers-to-numpy-matrices (bmu's answer)
+        confusion_matrix = pd.DataFrame(np.zeros((len(names_class), len(names_class))), index=names_class, columns=names_class)
+        for sample_i in range(test_data_x.shape[0]):
+            test_sample_x = test_data_x[sample_i, :]
+            true_class = test_data_y[sample_i]
+            predicted_class = self.predict(test_sample_x)
+
+            if predicted_class == true_class:
+                accuracy += 1
+
+            confusion_matrix[true_class][predicted_class] += 1
+
+        accuracy /= test_data_x.shape[0]
+        accuracy *= 100
+        print "accuracy: ", accuracy
+        print "confusion matrix: (row=>true class; col=>predicted class)"
+        print confusion_matrix
+
+    def predict(self, test_sample_x):
+        """Predict based on majority vote(for classification)
+        """
+        predicted_class_dict = dict()
+        for tree_i in range(self.n_decision_trees):
+            predicted_class = self.decision_trees[tree_i].predict(test_sample_x)
+            if predicted_class in predicted_class_dict:
+                predicted_class_dict[predicted_class] += 1
+            else:
+                predicted_class_dict[predicted_class] = 1
+
+        count_majority_class = 0
+        majority_class = None
+
+        for predicted_class in predicted_class_dict:
+            if predicted_class_dict[predicted_class] > count_majority_class:
+                majority_class = predicted_class
+                count_majority_class = predicted_class_dict[predicted_class]
+
+        return majority_class
+
+
+def process(method):
     har_obj = HAR()
     har_obj.load_train_data()
     har_obj.load_test_data()
-    flag_lstm_method = False
 
-    if flag_lstm_method is True:
-        har_obj.train_model(n_timestep=10, nb_epoch=5)
-    else:
+    if method == "lstm":
+        har_obj.train_lstm_model(n_timestep=10, nb_epoch=5)
+    elif method == "decision tree":
         # Decision Tree
         train_data_x = np.array(har_obj.train_data.ix[:, har_obj.train_data.columns.difference(["subject", "Activity"])])
         train_data_y = np.array(har_obj.train_data.ix[:, "Activity"])
-        # Pick a random subset of the features
-        feature_indices = sorted(random.sample(range(train_data_x.shape[1]), 100))
-        train_data_x = train_data_x[:, feature_indices]
-        decision_tree_obj = DecisionTree(train_data_x, train_data_y, max_depth=10)
-        decision_tree_obj.build_tree()
+        # Pick either a) random subset of the features  b) features with most variance
+        feature_index_arr = har_obj.select_feature_subset(train_data_x=train_data_x, n_feature_subset=100, method="std")
+        train_data_x = train_data_x[:, feature_index_arr]
+        decision_tree_obj = DecisionTree(train_data_x, train_data_y, max_depth=20)
+        decision_tree_obj.build_tree(verbose=True)
         decision_tree_obj.prune_tree()
         test_data_x = np.array(har_obj.test_data.ix[:, har_obj.test_data.columns.difference(["subject", "Activity"])])
         test_data_y = np.array(har_obj.test_data.ix[:, "Activity"])
-        test_data_x = test_data_x[:, feature_indices]
+        test_data_x = test_data_x[:, feature_index_arr]
         decision_tree_obj.evaluate(test_data_x, test_data_y)
+    elif method == "bagging":
+        # Bagging or Bootstrap aggregation
+        train_data_x = np.array(
+            har_obj.train_data.ix[:, har_obj.train_data.columns.difference(["subject", "Activity"])])
+        train_data_y = np.array(har_obj.train_data.ix[:, "Activity"])
+        # Pick either a) random subset of the features  b) features with most variance
+        feature_index_arr = har_obj.select_feature_subset(train_data_x=train_data_x, n_feature_subset=200, method="std")
+        train_data_x = train_data_x[:, feature_index_arr]
+        bagging_obj = Bagging(train_data_x, train_data_y, n_decision_trees=11)
+        bagging_obj.build_trees()
+        test_data_x = np.array(har_obj.test_data.ix[:, har_obj.test_data.columns.difference(["subject", "Activity"])])
+        test_data_y = np.array(har_obj.test_data.ix[:, "Activity"])
+        test_data_x = test_data_x[:, feature_index_arr]
+        bagging_obj.evaluate(test_data_x, test_data_y)
+    else:
+        assert False, "undefined method: {0}".format(method)
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(add_help=False)
+
+    parser.add_argument("-m", "--method", type=str)
+    args = parser.parse_args()
+    process(args.method)
 
 """
+How to run:
+    Example:
+    python human_activity_recognition.py --method "decision tree"
+
 References:
     Followed the LSTM explanation in these forums:
     https://datascience.stackexchange.com/questions/17024/rnns-with-multiple-features
