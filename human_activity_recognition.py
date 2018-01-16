@@ -193,21 +193,28 @@ class DecisionNode:
         self.class_count_dict = None
 
 
-# TODO Currently classification tree. Extend to regression.
+# TODO Currently only classification tree. Extend to regression.
 class DecisionTree:
-    def __init__(self, train_data_x, train_data_y, min_samples=5, max_depth=20):
+    def __init__(self, train_data_x, train_data_y, min_samples=5, max_depth=20, is_random_selection_predictors=False):
         """Initialize decision tree
 
             Parameters
             ----------
             train_data_x : numpy.ndarray of float with shape(n_samples,n_features)
             train_data_y : numpy array of string
+            is_random_selection_predictors : bool
+                    True for Random Forest
         """
         self.nodes = []  # Think about changes that might come due to prune
         self.train_data_x = train_data_x
         self.train_data_y = train_data_y
         self.min_samples = min_samples  # Minimum number of samples for a node to have to be considered for split
         self.max_depth = max_depth
+        self.is_random_selection_predictors = is_random_selection_predictors
+        if is_random_selection_predictors:
+            self.m_predictors = int(np.sqrt(train_data_x.shape[1]))
+        else:
+            self.m_predictors = None  # all predictors to be used for node splitting
         # TODO pass the list of feature names => probably no more required as train_data_x is build using the feature
         # names which we want
 
@@ -325,7 +332,13 @@ class DecisionTree:
         best_split_feature_index = None
         best_split_feature_val = None
 
-        for feature_i in range(n_features):
+        if self.is_random_selection_predictors:
+            # used in Random Forest
+            features_arr = random.sample(range(n_features), self.m_predictors)
+        else:
+            features_arr = range(n_features)
+
+        for feature_i in features_arr:
             cur_feature_values = self.train_data_x[self.nodes[node_index].data_index_array, feature_i]
             # ?? can we avoid sorting at each level
             # sort the feature values as we would select split points at different percentile
@@ -419,6 +432,8 @@ class DecisionTree:
             # As both the left and right nodes are leaf nodes, pruning them would lead to one decrease in number of leaf nodes
             n_samples = len(self.nodes[0].data_index_array)
             flag_prune = False
+            # TODO threshold for classification error increase should be passed as input parameter \
+            # This should be treated as one of the hyper-parameters
             if (combined_node_classification_error - subtree_classification_error)*1.0/n_samples < 0.01:
                 flag_prune = True
 
@@ -517,13 +532,17 @@ class DecisionTree:
 class Bagging:
     """Bagging using boot strapped samples
     """
-    def __init__(self, train_data_x, train_data_y, n_decision_trees, min_samples=5, max_depth=20):
+    def __init__(self, train_data_x, train_data_y, n_decision_trees, min_samples=5, max_depth=20,
+                 is_random_selection_predictors=False):
         self.decision_trees = []
         self.train_data_x = train_data_x
         self.train_data_y = train_data_y
         self.n_decision_trees = n_decision_trees
         self.min_samples = min_samples  # Minimum number of samples for a node to have to be considered for split
         self.max_depth = max_depth
+        # False: Bagging
+        # True: Random Forest
+        self.is_random_selection_predictors = is_random_selection_predictors
 
     def build_trees(self):
         n_sample = self.train_data_x.shape[0]
@@ -535,7 +554,8 @@ class Bagging:
             cur_train_data_y = self.train_data_y[sample_indices]
             # create a decision tree using the current bootstrapped samples
             decision_tree_obj = DecisionTree(train_data_x=cur_train_data_x, train_data_y=cur_train_data_y,
-                                             min_samples=self.min_samples, max_depth=self.max_depth)
+                                             min_samples=self.min_samples, max_depth=self.max_depth,
+                                             is_random_selection_predictors=self.is_random_selection_predictors)
             decision_tree_obj.build_tree()
             self.decision_trees.append(decision_tree_obj)
 
@@ -603,15 +623,20 @@ def process(method):
         test_data_y = np.array(har_obj.test_data.ix[:, "Activity"])
         test_data_x = test_data_x[:, feature_index_arr]
         decision_tree_obj.evaluate(test_data_x, test_data_y)
-    elif method == "bagging":
-        # Bagging or Bootstrap aggregation
+    elif method == "bagging" or method == "random forest":
+        # Bagging or Bootstrap aggregation, Random Forest
         train_data_x = np.array(
             har_obj.train_data.ix[:, har_obj.train_data.columns.difference(["subject", "Activity"])])
         train_data_y = np.array(har_obj.train_data.ix[:, "Activity"])
         # Pick either a) random subset of the features  b) features with most variance
         feature_index_arr = har_obj.select_feature_subset(train_data_x=train_data_x, n_feature_subset=200, method="std")
         train_data_x = train_data_x[:, feature_index_arr]
-        bagging_obj = Bagging(train_data_x, train_data_y, n_decision_trees=11)
+        if method == "bagging":
+            flag_random_selection_predictors = False
+        else:
+            flag_random_selection_predictors = True
+        bagging_obj = Bagging(train_data_x, train_data_y, n_decision_trees=11,
+                              is_random_selection_predictors=flag_random_selection_predictors)
         bagging_obj.build_trees()
         test_data_x = np.array(har_obj.test_data.ix[:, har_obj.test_data.columns.difference(["subject", "Activity"])])
         test_data_y = np.array(har_obj.test_data.ix[:, "Activity"])
